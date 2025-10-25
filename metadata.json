@@ -1,0 +1,7 @@
+{
+  "name": "A Conversation with Thomas Jefferson",
+  "description": "Engage in a real-time voice conversation with an AI persona of Thomas Jefferson, discussing the Federalist Papers from his historical Anti-Federalist perspective. Your spoken words and his responses are transcribed into a chat log for you to review.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
