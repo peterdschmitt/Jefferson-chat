@@ -1,31 +1,32 @@
+
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { GoogleGenAI, LiveSession, LiveServerMessage, Modality, Blob } from '@google/genai';
-import { Message, Status } from './types';
+import { Message, Status, VoiceOption, Voices, AccentOption, Accents, SpeechRateOption, SpeechRates } from './types';
 import { createBlob, decode, decodeAudioData } from './utils/audio';
 import ChatMessage from './components/ChatMessage';
 import { MicrophoneIcon, StopIcon, JeffersonIcon } from './components/IconComponents';
-
-// IMPORTANT: Replace with your actual Gemini API key
-const API_KEY = "YOUR_API_KEY_HERE";
 
 const App: React.FC = () => {
     const [chatHistory, setChatHistory] = useState<Message[]>([
         {
             role: 'model',
             text: "Good day. I am Thomas Jefferson. I understand you wish to discuss the Federalist Papers. A topic of great import, though one on which I hold certain... reservations. Pray, begin with your inquiries.",
+            isComplete: true,
         },
     ]);
     const [status, setStatus] = useState<Status>(Status.IDLE);
     const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
+    
+    // Voice settings state
+    const [selectedVoice, setSelectedVoice] = useState<VoiceOption>('Charon');
+    const [selectedAccent, setSelectedAccent] = useState<AccentOption>('English (Received Pronunciation)');
+    const [selectedRate, setSelectedRate] = useState<SpeechRateOption>('Faster');
     
     const liveSessionRef = useRef<LiveSession | null>(null);
     const mediaStreamRef = useRef<MediaStream | null>(null);
     const audioContextRef = useRef<AudioContext | null>(null);
     const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
     const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-
-    const inputTranscriptionRef = useRef<string>('');
-    const outputTranscriptionRef = useRef<string>('');
     
     const chatContainerRef = useRef<HTMLDivElement>(null);
     
@@ -75,17 +76,46 @@ const App: React.FC = () => {
         stopAudioPlayback();
     }, [stopAudioPlayback]);
 
+    const generateSystemInstruction = useCallback(() => {
+        const voiceDescription = Voices.find(v => v.name === selectedVoice)?.description || 'a deep, resonant baritone';
+
+        let accentInstruction = '';
+        switch (selectedAccent) {
+            case 'English (Received Pronunciation)':
+                accentInstruction = "You MUST speak with a crisp, clear, and authentic English accent, specifically Received Pronunciation (RP). Do not deviate from this accent.";
+                break;
+            case 'American (Standard)':
+                accentInstruction = "You MUST speak with a standard American accent. Your speech should be clear and unregional.";
+                break;
+            case 'French (Subtle Influence)':
+                accentInstruction = "You MUST speak with a standard American accent that carries a subtle, but noticeable, hint of French influence from your time as an ambassador to France. This influence should be consistent.";
+                break;
+        }
+
+        const rateDescription = SpeechRates[selectedRate];
+
+        return `
+You are Thomas Jefferson, a Founding Father of the United States, engaging in a conversation about the Federalist Papers.
+Your historical persona is that of an Anti-Federalist; you must articulate your concerns about a strong central government and the lack of a Bill of Rights.
+Maintain a thoughtful, eloquent, and slightly formal tone, consistent with a statesman of the 18th century.
+
+Your vocal delivery is critical and MUST adhere to the following strict requirements:
+1.  **Voice Profile**: Your voice must be a ${voiceDescription.toLowerCase().replace('.', '')}.
+2.  **Accent**: ${accentInstruction}
+3.  **Pace**: You MUST speak at ${rateDescription}.
+
+It is absolutely imperative that you maintain this specific vocal character (voice, accent, and pace) consistently throughout our entire conversation. Any deviation will break the immersion.
+        `.trim();
+    }, [selectedVoice, selectedAccent, selectedRate]);
+
     const handleStartConversation = useCallback(async () => {
         setStatus(Status.CONNECTING);
         try {
-            if (API_KEY === "YOUR_API_KEY_HERE") {
-                alert("Please replace 'YOUR_API_KEY_HERE' with your actual Gemini API key in App.tsx");
-                setStatus(Status.ERROR);
-                return;
-            }
-            const ai = new GoogleGenAI({ apiKey: API_KEY });
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
             
             outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+
+            const systemInstruction = generateSystemInstruction();
 
             const sessionPromise = ai.live.connect({
                 model: 'gemini-2.5-flash-native-audio-preview-09-2025',
@@ -120,25 +150,37 @@ const App: React.FC = () => {
                         }
                     },
                     onmessage: async (message: LiveServerMessage) => {
+                        if (message.serverContent?.inputTranscription) {
+                            const textChunk = message.serverContent.inputTranscription.text;
+                            setChatHistory(prev => {
+                                const lastMessage = prev[prev.length - 1];
+                                if (lastMessage?.role === 'user' && !lastMessage.isComplete) {
+                                    const newHistory = [...prev];
+                                    newHistory[prev.length - 1] = { ...lastMessage, text: lastMessage.text + textChunk };
+                                    return newHistory;
+                                } else {
+                                    return [...prev, { role: 'user', text: textChunk, isComplete: false }];
+                                }
+                            });
+                        }
+
                         if (message.serverContent?.outputTranscription) {
-                            outputTranscriptionRef.current += message.serverContent.outputTranscription.text;
-                        } else if (message.serverContent?.inputTranscription) {
-                            inputTranscriptionRef.current += message.serverContent.inputTranscription.text;
+                            setIsSpeaking(true);
+                            const textChunk = message.serverContent.outputTranscription.text;
+                            setChatHistory(prev => {
+                                const lastMessage = prev[prev.length - 1];
+                                if (lastMessage?.role === 'model' && !lastMessage.isComplete) {
+                                    const newHistory = [...prev];
+                                    newHistory[prev.length - 1] = { ...lastMessage, text: lastMessage.text + textChunk };
+                                    return newHistory;
+                                } else {
+                                    return [...prev, { role: 'model', text: textChunk, isComplete: false }];
+                                }
+                            });
                         }
 
                         if (message.serverContent?.turnComplete) {
-                            const userInput = inputTranscriptionRef.current.trim();
-                            const modelResponse = outputTranscriptionRef.current.trim();
-                            
-                            if (userInput) {
-                                setChatHistory(prev => [...prev, { role: 'user', text: userInput }]);
-                            }
-                            if (modelResponse) {
-                                setChatHistory(prev => [...prev, { role: 'model', text: modelResponse }]);
-                            }
-                            
-                            inputTranscriptionRef.current = '';
-                            outputTranscriptionRef.current = '';
+                            setChatHistory(prev => prev.map(msg => ({ ...msg, isComplete: true })));
                         }
                         
                         const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
@@ -174,8 +216,6 @@ const App: React.FC = () => {
                         handleStopConversation();
                     },
                     onclose: () => {
-                        // This might be called on natural end, so we don't set error status
-                        // unless it was unexpected.
                         if (status !== Status.IDLE) {
                              handleStopConversation();
                         }
@@ -183,8 +223,8 @@ const App: React.FC = () => {
                 },
                 config: {
                     responseModalities: [Modality.AUDIO],
-                    speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Fenrir' } } },
-                    systemInstruction: `You are Thomas Jefferson, a Founding Father of the United States. You are speaking with an individual about the Federalist Papers. It is important to remember that you were an Anti-Federalist and often disagreed with the ideas presented by Alexander Hamilton, James Madison, and John Jay in those essays. Respond from your historical perspective, articulating your concerns about a strong central government and the lack of a Bill of Rights. Maintain a thoughtful, eloquent, and slightly formal tone, consistent with a statesman of the 18th century. Your voice should be a mild baritone, reflecting a man in his mid-40s with a mix of American and English influences in his accent.`,
+                    speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedVoice } } },
+                    systemInstruction,
                     inputAudioTranscription: {},
                     outputAudioTranscription: {},
                 },
@@ -196,7 +236,7 @@ const App: React.FC = () => {
             setStatus(Status.ERROR);
             await handleStopConversation();
         }
-    }, [handleStopConversation, stopAudioPlayback]);
+    }, [status, handleStopConversation, stopAudioPlayback, selectedVoice, generateSystemInstruction]);
 
     const isRecording = status === Status.LISTENING || status === Status.CONNECTING;
 
@@ -211,12 +251,58 @@ const App: React.FC = () => {
     
     return (
         <div className="flex flex-col h-screen font-serif bg-[#fdfaf5] text-gray-800">
-            <header className="flex items-center justify-between p-4 border-b border-gray-300 bg-white shadow-sm">
-                 <div className="flex items-center space-x-3">
-                    <JeffersonIcon />
-                    <div>
-                        <h1 className="text-xl font-bold text-gray-900">A Conversation with Thomas Jefferson</h1>
-                        <p className="text-sm text-gray-600">On the topic of The Federalist Papers</p>
+            <header className="p-4 border-b border-gray-300 bg-white shadow-sm">
+                <div className="flex items-center justify-between flex-wrap gap-4">
+                    <div className="flex items-center space-x-3">
+                        <JeffersonIcon />
+                        <div>
+                            <h1 className="text-xl font-bold text-gray-900">A Conversation with Thomas Jefferson</h1>
+                            <p className="text-sm text-gray-600">On the topic of The Federalist Papers</p>
+                        </div>
+                    </div>
+                    <div className="flex items-center space-x-4 flex-wrap gap-y-2">
+                         <div className="flex items-center space-x-2">
+                            <label htmlFor="voice-select" className="text-sm font-medium text-gray-700">Voice:</label>
+                            <select
+                                id="voice-select"
+                                value={selectedVoice}
+                                onChange={(e) => setSelectedVoice(e.target.value as VoiceOption)}
+                                disabled={isRecording}
+                                className="bg-white border border-gray-300 text-gray-800 rounded-md shadow-sm py-1 px-3 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                            >
+                                {Voices.map(voice => (
+                                    <option key={voice.name} value={voice.name}>{`${voice.name} - ${voice.description}`}</option>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                            <label htmlFor="accent-select" className="text-sm font-medium text-gray-700">Accent:</label>
+                            <select
+                                id="accent-select"
+                                value={selectedAccent}
+                                onChange={(e) => setSelectedAccent(e.target.value as AccentOption)}
+                                disabled={isRecording}
+                                className="bg-white border border-gray-300 text-gray-800 rounded-md shadow-sm py-1 px-3 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                            >
+                                {Accents.map(accent => (
+                                    <option key={accent} value={accent}>{accent}</option>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                            <label htmlFor="rate-select" className="text-sm font-medium text-gray-700">Pace:</label>
+                            <select
+                                id="rate-select"
+                                value={selectedRate}
+                                onChange={(e) => setSelectedRate(e.target.value as SpeechRateOption)}
+                                disabled={isRecording}
+                                className="bg-white border border-gray-300 text-gray-800 rounded-md shadow-sm py-1 px-3 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                            >
+                                {(Object.keys(SpeechRates) as SpeechRateOption[]).map(rate => (
+                                    <option key={rate} value={rate}>{rate}</option>
+                                ))}
+                            </select>
+                        </div>
                     </div>
                 </div>
             </header>
